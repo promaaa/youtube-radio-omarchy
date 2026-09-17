@@ -13,7 +13,8 @@ Item {
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "promaa.youtube-radio"
   readonly property string home: Quickshell.env("HOME")
-  readonly property string socketPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-youtube-radio.sock"
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+  readonly property string socketPath: runtimeDir + "/omarchy-youtube-radio.sock"
 
   // ------------------------------------------------------------ Presets
 
@@ -127,7 +128,8 @@ Item {
   property real volume: settings.volume
   property string title: ""
   property real position: 0
-  property real duration: 0
+  property real mpvDuration: 0
+  readonly property real duration: dvr ? liveEdge : mpvDuration
   property bool seekable: false
   property bool isLive: false
   property string stream: ""
@@ -139,6 +141,21 @@ Item {
   property bool loaded: false
   property bool restartPending: false
   property string pendingUrl: ""
+  property string playTarget: ""   // what mpv actually opens (URL, file, or the DVR playlist)
+  property real startAt: -1        // where to open playTarget, -1 = default
+
+  // ---- Live DVR. ffmpeg cannot seek inside a live HLS playlist, so for YouTube
+  // lives dvr.sh writes a finished playlist spanning every segment still served
+  // plus hours of future sequence numbers (YouTube holds those requests until the
+  // segment exists). mpv then sees one long seekable file; `duration` is remapped
+  // to the moving live edge so the slider ends at "now".
+  readonly property string dvrScript: Qt.resolvedUrl("dvr.sh").toString().replace(/^file:\/\//, "")
+  readonly property string dvrPlaylist: runtimeDir + "/omarchy-youtube-radio.m3u8"
+  readonly property int liveMargin: 15 // seconds behind the edge, like a normal live start
+  property bool dvr: false
+  property real dvrEdgeAtBuild: 0
+  property real dvrBuiltAt: 0
+  property real liveEdge: 0
 
   readonly property string status: {
     if (!running) return probing ? "starting" : lastError ? "error" : "stopped"
@@ -189,9 +206,15 @@ Item {
       "--volume=" + Math.round(settings.volume),
       "--mute=" + (settings.muted ? "yes" : "no"),
       "--ytdl=yes", "--ytdl-format=bestaudio/best",
-      "--keep-open=no", "--msg-level=all=warn"
+      "--keep-open=no", "--msg-level=all=warn",
+      // No external scripts: keeps mpv-mpris off, so voxtype / media keys / the bar's
+      // media widget cannot pause or control the radio. Only this plugin drives it.
+      "--load-scripts=no",
+      // Let the local DVR playlist reference extension-less https segments.
+      "--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto],allowed_extensions=ALL"
     ]
     if (!isLive) cmd.push("--loop-file=inf")
+    if (startAt >= 0) cmd.push("--start=" + startAt)
     var raw = []
     if (settings.cookiesFile) raw.push("cookies=" + settings.cookiesFile)
     if (settings.cookiesFromBrowser) raw.push("cookies-from-browser=" + settings.cookiesFromBrowser)
@@ -223,8 +246,22 @@ Item {
     }
     title = ""
     stream = ""
+    setTarget(url)
     launch(url)
     return true
+  }
+
+  function setTarget(target) {
+    dvr = false
+    playTarget = target
+    startAt = -1
+  }
+
+  function loadTarget() {
+    loaded = false
+    ipcSend(startAt >= 0 ? ["loadfile", playTarget, "replace", -1, { start: String(startAt) }]
+                         : ["loadfile", playTarget, "replace"])
+    if (paused) setPaused(false)
   }
 
   function launch(url) {
@@ -240,9 +277,7 @@ Item {
 
     if (mpvProc.running) {
       activeUrl = url
-      loaded = false
-      ipcSend(["loadfile", url, "replace"])
-      if (paused) setPaused(false)
+      loadTarget()
       return
     }
     cleanupProc.running = true
@@ -252,7 +287,7 @@ Item {
     if (!pendingUrl || mpvProc.running) return
     activeUrl = pendingUrl
     loaded = false
-    mpvProc.command = buildCommand(pendingUrl)
+    mpvProc.command = buildCommand(playTarget)
     mpvProc.running = true
   }
 
@@ -296,7 +331,8 @@ Item {
     var n = Number(secs)
     if (!isFinite(n) || !loaded || !seekable) return false
     var target = Math.max(0, (mode === "absolute" ? 0 : position) + n)
-    if (duration > 0) target = Math.min(duration, target)
+    var limit = dvr ? liveEdge - liveMargin : duration
+    if (limit > 0) target = Math.min(limit, target)
     if (!ipcSend(["seek", target, "absolute"])) return false
     position = target
     pollPosition()
@@ -304,6 +340,7 @@ Item {
   }
 
   function pollPosition() {
+    if (dvr) liveEdge = dvrEdgeAtBuild + (Date.now() - dvrBuiltAt) / 1000
     ipcSend({ command: ["get_property", "time-pos"], request_id: 1001 })
   }
 
@@ -345,6 +382,7 @@ Item {
   function probeNow() {
     var script = 'out=$(timeout 45 yt-dlp --no-playlist --no-warnings -f "bestaudio/best" '
       + '--print "T:%(title)s" --print "A:%(acodec)s" --print "L:%(is_live)s" '
+      + '--print "P:%(protocol)s" --print "M:%(url)s" '
       + '${2:+--cookies "$2"} ${3:+--cookies-from-browser "$3"} -- "$1" 2>&1); rc=$?; '
       + 'printf "R:%s\\nU:%s\\n%s\\n" "$rc" "$1" "$out"'
     probeProc.command = ["bash", "-c", script, "yt-dlp-probe", probeUrl.replace(/^ytdl:\/\//, ""),
@@ -358,7 +396,7 @@ Item {
   }
 
   function probeFinished(text) {
-    var f = { R: "-1", U: "", T: "", A: "", L: "" }, err = ""
+    var f = { R: "-1", U: "", T: "", A: "", L: "", P: "", M: "" }, err = ""
     for (var line of String(text || "").split("\n")) {
       if (line.charAt(1) === ":" && line.charAt(0) in f) f[line.charAt(0)] = line.slice(2)
       else if (/^ERROR:/.test(line)) err = line
@@ -375,8 +413,13 @@ Item {
       isLive = /^true$/i.test(f.L)
       stream = describeAudioStream(f.A, isLive)
       lastError = ""
-      if (probeReason === "start") launch(probeUrl)
-      else if (mpvProc.running) ipcSend(["loadfile", probeUrl, "replace"])
+      if (isLive && /^m3u8/.test(f.P) && f.M) {
+        dvrProc.command = ["bash", dvrScript, f.M, dvrPlaylist]
+        dvrProc.running = true
+        return
+      }
+      setTarget(probeUrl)
+      resolved()
       return
     }
 
@@ -388,6 +431,32 @@ Item {
     lastError = probeError(err, rc)
     console.log("youtube-radio: probe failed rc=" + rc + ": " + lastError)
     if (probeReason === "retry") scheduleRetry()
+  }
+
+  function resolved() {
+    if (probeReason === "start") launch(probeUrl)
+    else if (mpvProc.running) loadTarget()
+  }
+
+  Process {
+    id: dvrProc
+    stdout: StdioCollector { onStreamFinished: root.dvrFinished(text) }
+  }
+
+  function dvrFinished(text) {
+    var f = String(text || "").trim().split(/\s+/).map(Number)
+    if (f.length === 3 && f.every(isFinite) && f[2] > 0) {
+      dvrEdgeAtBuild = (f[1] - f[0] + 1) * f[2]
+      dvrBuiltAt = Date.now()
+      liveEdge = dvrEdgeAtBuild
+      dvr = true
+      playTarget = dvrPlaylist
+      startAt = Math.max(0, Math.round(liveEdge - liveMargin))
+      stream += " · DVR " + Math.round(liveEdge / 3600) + "h"
+    } else {
+      setTarget(probeUrl) // plain live playback, no seeking
+    }
+    resolved()
   }
 
   function describeAudioStream(acodec, live) {
@@ -543,10 +612,10 @@ Item {
         case "pause": paused = d === true; break
         case "mute": muted = d === true; break
         case "volume": if (isFinite(Number(d))) volume = Number(d); break
-        case "duration": duration = Number(d) > 0 ? Number(d) : 0; break
+        case "duration": mpvDuration = Number(d) > 0 ? Number(d) : 0; break
         case "seekable": seekable = d === true; break
         case "media-title":
-          if (typeof d === "string" && d !== "") {
+          if (!dvr && typeof d === "string" && d !== "") {
             title = d
             if (loaded) refreshHistoryTitle(activeUrl, title)
           }
@@ -562,9 +631,10 @@ Item {
       refreshHistoryTitle(activeUrl, title)
     } else if (msg.event === "end-file") {
       position = 0
-      duration = 0
+      mpvDuration = 0
       seekable = false
-      if (msg.reason === "error") {
+      if (msg.reason === "eof" && dvr && !stopRequested) start(activeUrl) // ran off the future list: rebuild at the edge
+      else if (msg.reason === "error") {
         lastError = "Erreur de lecture: " + (msg.file_error || "inconnu")
         loaded = false
         scheduleRetry()
@@ -591,7 +661,7 @@ Item {
     onTriggered: {
       if (!mpvProc.running || root.stopRequested) return
       if (root.needsProbe(root.activeUrl)) root.runProbe(root.activeUrl, "retry")
-      else root.ipcSend(["loadfile", root.activeUrl, "replace"])
+      else root.loadTarget()
     }
   }
 
@@ -661,6 +731,7 @@ Item {
         title: root.title,
         stream: root.stream,
         isLive: root.isLive,
+        dvr: root.dvr,
         paused: root.paused,
         muted: root.muted,
         volume: Math.round(root.volume),

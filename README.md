@@ -10,6 +10,7 @@ Lecteur audio et radio en tâche de fond pour Omarchy Linux. Écoutez vos lives 
   - **EverPop 7080** : Radio pop coréenne 7080 live
   - **Lofi Girl** : Flux radio live 24/7 lofi hip hop
 - **Contrôles transport complets** : Lecture, Pause, Reprendre, Arrêter, Couper le son, Curseur de volume.
+- **Retour en arrière dans les directs (DVR)** : le curseur Position couvre toute la fenêtre encore disponible chez YouTube (plusieurs heures), pas seulement le cache de mpv.
 - **Historique** des 10 dernières vidéos ou stations jouées.
 - **Pilotage en ligne de commande (IPC)** via `omarchy-shell`.
 - **Raccourcis clavier** dans le panneau :
