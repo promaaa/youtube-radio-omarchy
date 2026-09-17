@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "promaa.youtube-radio",
+  "name": "YouTube Radio",
+  "version": "1.0.0",
+  "author": "promaaa",
+  "license": "MIT",
+  "description": "Lightweight background YouTube audio & live radio stream player for Omarchy.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "YouTube Radio",
+    "description": "Background YouTube audio and 24/7 radio player",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
