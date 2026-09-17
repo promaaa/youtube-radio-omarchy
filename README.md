@@ -34,9 +34,8 @@ omarchy pkg add mpv yt-dlp
 
 ## Installation
 
-Activez le plugin dans Omarchy :
-
 ```bash
+omarchy plugin add https://github.com/promaaa/youtube-radio-omarchy.git
 omarchy plugin enable promaa.youtube-radio --section right
 ```
 
