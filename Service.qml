@@ -4,23 +4,16 @@ import Quickshell
 import Quickshell.Io
 import QtQuick
 
-// Lightweight background YouTube audio & live radio player for Omarchy.
-// Uses headless mpv (--no-video) with yt-dlp to stream audio with minimal CPU/RAM.
+// Background YouTube audio & live radio player: headless mpv (--no-video) + yt-dlp.
 Item {
   id: root
 
   property var shell
   property var manifest
 
-  readonly property string pluginId:
-    manifest && manifest.id ? String(manifest.id) : "promaa.youtube-radio"
-
+  readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "promaa.youtube-radio"
   readonly property string home: Quickshell.env("HOME")
-  readonly property string runtimeDir: {
-    var dir = Quickshell.env("XDG_RUNTIME_DIR")
-    return dir ? String(dir) : "/tmp"
-  }
-  readonly property string socketPath: runtimeDir + "/omarchy-youtube-radio.sock"
+  readonly property string socketPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-youtube-radio.sock"
 
   // ------------------------------------------------------------ Presets
 
@@ -44,66 +37,47 @@ Item {
   ]
 
   function presetForId(id) {
-    for (var i = 0; i < presets.length; i++) {
+    for (var i = 0; i < presets.length; i++)
       if (presets[i].id === id) return presets[i]
-    }
     return null
   }
 
-  function presetForUrl(targetUrl) {
-    if (!targetUrl) return null
+  function presetForUrl(url) {
+    var s = String(url || "")
     for (var i = 0; i < presets.length; i++) {
       var p = presets[i]
-      if (p.url === targetUrl || (p.fallbackUrl && p.fallbackUrl === targetUrl)) return p
-      // Also match channel or video ids
-      if (targetUrl.indexOf("UCuhbvx36nseQJnvHQ02XDWw") !== -1 || targetUrl.indexOf("D4H7ItMDIGU") !== -1) {
-        if (p.id === "everpop") return p
-      }
-      if (targetUrl.indexOf("@LofiGirl") !== -1 || targetUrl.indexOf("jfKfPfyJRdk") !== -1) {
-        if (p.id === "lofigirl") return p
-      }
+      if (s === p.url || s === p.fallbackUrl || s.indexOf(p.fallbackUrl.split("v=")[1]) !== -1) return p
     }
     return null
   }
 
   // ------------------------------------------------------------ Settings
+  // The scoped plugin shell API exposes no live config, so read shell.json
+  // directly and let the watcher keep it fresh.
+
+  property var config: ({})
 
   FileView {
-    id: userShellConfig
     path: root.home + "/.config/omarchy/shell.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.settingsRevision++
+    onLoaded: { try { root.config = JSON.parse(text()) } catch (e) { root.config = {} } }
   }
-  property int settingsRevision: 0
 
   QtObject {
     id: settings
 
     readonly property var entry: {
-      var revision = root.settingsRevision
-      var config = null
-      if (root.shell && root.shell.shellConfig) {
-        config = root.shell.shellConfig
-      } else {
-        try {
-          config = JSON.parse(String(userShellConfig.text() || "{}"))
-        } catch (e) {
-          config = null
-        }
-      }
-      if (!config) return ({})
+      var c = root.config
       var lists = []
-      if (config.bar && config.bar.layout) {
-        var sections = ["left", "center", "right"]
-        for (var s = 0; s < sections.length; s++)
-          if (Array.isArray(config.bar.layout[sections[s]])) lists.push(config.bar.layout[sections[s]])
-      }
-      if (Array.isArray(config.plugins)) lists.push(config.plugins)
+      if (c.bar && c.bar.layout)
+        for (var s of ["left", "center", "right"])
+          if (Array.isArray(c.bar.layout[s])) lists.push(c.bar.layout[s])
+      if (Array.isArray(c.plugins)) lists.push(c.plugins)
       for (var l = 0; l < lists.length; l++)
         for (var i = 0; i < lists[l].length; i++)
-          if (lists[l][i] && String(lists[l][i].id) === root.pluginId) return lists[l][i]
+          if (lists[l][i] && lists[l][i].id === root.pluginId) return lists[l][i]
       return ({})
     }
 
@@ -114,32 +88,29 @@ Item {
     readonly property string cookiesFile: typeof entry.cookiesFile === "string" ? entry.cookiesFile.trim() : ""
     readonly property string cookiesFromBrowser: typeof entry.cookiesFromBrowser === "string" ? entry.cookiesFromBrowser.trim() : ""
     readonly property var history: {
-      if (!Array.isArray(entry.history)) return []
       var out = []
-      for (var i = 0; i < entry.history.length && out.length < root.historyLimit; i++) {
-        var h = entry.history[i]
-        if (!h || typeof h.url !== "string" || h.url === "") continue
-        out.push({ url: h.url, title: typeof h.title === "string" ? h.title : "" })
+      var src = Array.isArray(entry.history) ? entry.history : []
+      for (var i = 0; i < src.length && out.length < root.historyLimit; i++) {
+        var h = src[i]
+        if (h && typeof h.url === "string" && h.url !== "")
+          out.push({ url: h.url, title: typeof h.title === "string" ? h.title : "" })
       }
       return out
     }
   }
 
   function persistMany(changes) {
-    if (!shell || typeof shell.updateEntryInline !== "function") return false
+    if (!shell) return
     var next = { id: root.pluginId }
-    for (var k in settings.entry)
-      if (k !== "id") next[k] = settings.entry[k]
+    for (var k in settings.entry) if (k !== "id") next[k] = settings.entry[k]
     for (var c in changes) next[c] = changes[c]
     shell.updateEntryInline(root.pluginId, next)
-    return true
   }
 
   function persist(key, value) {
     var changes = {}
     changes[key] = value
     persistMany(changes)
-    return value
   }
 
   // ------------------------------------------------------------ Public State
@@ -149,7 +120,7 @@ Item {
   readonly property string url: settings.url
   readonly property string cookiesFile: settings.cookiesFile
   readonly property string cookiesFromBrowser: settings.cookiesFromBrowser
-  readonly property string cookies: settings.cookiesFile !== "" ? settings.cookiesFile : settings.cookiesFromBrowser
+  readonly property string cookies: settings.cookiesFile || settings.cookiesFromBrowser
 
   property bool paused: false
   property bool muted: settings.muted
@@ -166,12 +137,11 @@ Item {
   property string stderrTail: ""
   property bool stopRequested: false
   property bool loaded: false
+  property bool restartPending: false
+  property string pendingUrl: ""
 
   readonly property string status: {
-    if (!running) {
-      if (probing) return "starting"
-      return lastError ? "error" : "stopped"
-    }
+    if (!running) return probing ? "starting" : lastError ? "error" : "stopped"
     if (lastError && !loaded) return "error"
     if (!ipcConnected || !loaded) return "starting"
     return paused ? "paused" : "playing"
@@ -191,67 +161,48 @@ Item {
   function refreshHistoryTitle(url, title) {
     var old = settings.history
     if (!url || !title || !old.length || old[0].url !== url || old[0].title === title) return
-    if (url.slice(-title.length) === title) return
+    if (url.slice(-title.length) === title) return // mpv echoing a local filename
     persist("history", historyWith(url, title))
-  }
-
-  function clearHistory() {
-    persist("history", [])
   }
 
   function fallbackTitle(url) {
     var p = presetForUrl(url)
     if (p) return p.title
     var s = String(url || "")
-    if (/^\//.test(s)) return s.split("/").pop()
-    return s
+    return s.charAt(0) === "/" ? s.split("/").pop() : s
   }
 
-  function isPlayableUrl(value) {
-    var s = String(value || "").trim()
-    return /^(https?:\/\/|ytdl:\/\/|\/)/.test(s)
-  }
-
-  function needsProbe(value) {
-    return /^(https?:\/\/|ytdl:\/\/)/.test(String(value || ""))
-  }
+  function isPlayableUrl(s) { return /^(https?:\/\/|ytdl:\/\/|\/)/.test(s) }
+  function needsProbe(s) { return /^(https?:\/\/|ytdl:\/\/)/.test(s) }
 
   function normalizeUrl(value) {
     var s = String(value || "").trim()
-    if (/^[A-Za-z0-9_-]{11}$/.test(s)) return "https://www.youtube.com/watch?v=" + s
-    return s
+    return /^[A-Za-z0-9_-]{11}$/.test(s) ? "https://www.youtube.com/watch?v=" + s : s
   }
 
   // ------------------------------------------------------------ Control
 
   function buildCommand(url) {
     var cmd = [
-      "mpv",
-      "--no-video",
+      "mpv", "--no-video",
       "--input-ipc-server=" + socketPath,
       "--volume=" + Math.round(settings.volume),
       "--mute=" + (settings.muted ? "yes" : "no"),
-      "--ytdl=yes",
-      "--ytdl-format=bestaudio/best",
-      "--keep-open=no",
-      "--msg-level=all=warn"
+      "--ytdl=yes", "--ytdl-format=bestaudio/best",
+      "--keep-open=no", "--msg-level=all=warn"
     ]
-    if (!root.isLive) cmd.push("--loop-file=inf")
+    if (!isLive) cmd.push("--loop-file=inf")
     var raw = []
-    if (settings.cookiesFile !== "") raw.push("cookies=" + settings.cookiesFile)
-    if (settings.cookiesFromBrowser !== "") raw.push("cookies-from-browser=" + settings.cookiesFromBrowser)
+    if (settings.cookiesFile) raw.push("cookies=" + settings.cookiesFile)
+    if (settings.cookiesFromBrowser) raw.push("cookies-from-browser=" + settings.cookiesFromBrowser)
     if (raw.length) cmd.push("--ytdl-raw-options=" + raw.join(",").replace(/"/g, ""))
     cmd.push(url)
     return cmd
   }
 
-  property string pendingUrl: ""
-
   function playPreset(presetId) {
     var p = presetForId(presetId)
-    if (!p) return false
-    activePresetId = p.id
-    return start(p.url)
+    return p ? start(p.url) : false
   }
 
   function start(value) {
@@ -260,15 +211,12 @@ Item {
       lastError = url ? "URL invalide: " + url : "Aucune URL sélectionnée"
       return false
     }
-
-    var matchedPreset = presetForUrl(url)
-    activePresetId = matchedPreset ? matchedPreset.id : ""
-
+    var p = presetForUrl(url)
+    activePresetId = p ? p.id : ""
     lastError = ""
     stopRequested = false
     retryTimer.stop()
     retries = 0
-
     if (needsProbe(url)) {
       runProbe(url, "start")
       return true
@@ -297,11 +245,10 @@ Item {
       if (paused) setPaused(false)
       return
     }
-    if (!cleanupProc.running) cleanupProc.running = true
+    cleanupProc.running = true
   }
 
   function launchPending() {
-    console.log("youtube-radio: launchPending url=" + pendingUrl + " running=" + mpvProc.running)
     if (!pendingUrl || mpvProc.running) return
     activeUrl = pendingUrl
     loaded = false
@@ -323,13 +270,17 @@ Item {
   function toggle() {
     if (running) stop()
     else start()
-    return running
+  }
+
+  function restart() {
+    if (!running) return
+    restartPending = true
+    stop(false)
   }
 
   function ipcSend(command) {
     if (!ipcConnected) return false
-    var msg = Array.isArray(command) ? { command: command } : command
-    ipc.write(JSON.stringify(msg) + "\n")
+    ipc.write(JSON.stringify(Array.isArray(command) ? { command: command } : command) + "\n")
     ipc.flush()
     return true
   }
@@ -339,17 +290,13 @@ Item {
     ipcSend(["set_property", "pause", paused])
   }
 
-  function togglePause() {
-    setPaused(!paused)
-  }
+  function togglePause() { setPaused(!paused) }
 
   function seek(secs, mode) {
     var n = Number(secs)
-    if (!isFinite(n) || !running || !loaded || !seekable) return false
-    mode = mode === "absolute" ? "absolute" : "relative"
-    var target = mode === "absolute" ? n : position + n
-    if (duration > 0) target = Math.max(0, Math.min(duration, target))
-    else target = Math.max(0, target)
+    if (!isFinite(n) || !loaded || !seekable) return false
+    var target = Math.max(0, (mode === "absolute" ? 0 : position) + n)
+    if (duration > 0) target = Math.min(duration, target)
     if (!ipcSend(["seek", target, "absolute"])) return false
     position = target
     pollPosition()
@@ -378,18 +325,11 @@ Item {
     var v = String(value || "").trim()
     var changes = { cookiesFile: "", cookiesFromBrowser: "" }
     if (/^[~\/]/.test(v)) changes.cookiesFile = v.replace(/^~(?=\/|$)/, home)
-    else if (v !== "") changes.cookiesFromBrowser = v
+    else changes.cookiesFromBrowser = v
     persistMany(changes)
     if (running) restart()
     return changes.cookiesFile || changes.cookiesFromBrowser
   }
-
-  function restart() {
-    if (!running) return
-    restartPending = true
-    stop(false)
-  }
-  property bool restartPending: false
 
   // ------------------------------------------------------------ yt-dlp Probe
 
@@ -399,81 +339,62 @@ Item {
   function runProbe(url, reason) {
     probeUrl = url
     probeReason = reason
-    if (probeProc.running) return
-    probeNow()
+    if (!probeProc.running) probeNow()
   }
 
   function probeNow() {
-    var target = probeUrl.replace(/^ytdl:\/\//, "")
     var script = 'out=$(timeout 45 yt-dlp --no-playlist --no-warnings -f "bestaudio/best" '
       + '--print "T:%(title)s" --print "A:%(acodec)s" --print "L:%(is_live)s" '
       + '${2:+--cookies "$2"} ${3:+--cookies-from-browser "$3"} -- "$1" 2>&1); rc=$?; '
       + 'printf "R:%s\\nU:%s\\n%s\\n" "$rc" "$1" "$out"'
-    probeProc.command = ["bash", "-c", script, "yt-dlp-probe", target,
+    probeProc.command = ["bash", "-c", script, "yt-dlp-probe", probeUrl.replace(/^ytdl:\/\//, ""),
                          settings.cookiesFile, settings.cookiesFromBrowser]
     probeProc.running = true
   }
 
   Process {
     id: probeProc
-    stdout: StdioCollector {
-      onStreamFinished: root.probeFinished(text)
-    }
+    stdout: StdioCollector { onStreamFinished: root.probeFinished(text) }
   }
 
   function probeFinished(text) {
-    var rc = -1, url = "", title = "", acodec = "", isLiveStr = "", err = ""
-    var lines = String(text || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i]
-      if (line.indexOf("R:") === 0) rc = parseInt(line.slice(2), 10)
-      else if (line.indexOf("U:") === 0) url = line.slice(2)
-      else if (line.indexOf("T:") === 0) title = line.slice(2)
-      else if (line.indexOf("A:") === 0) acodec = line.slice(2)
-      else if (line.indexOf("L:") === 0) isLiveStr = line.slice(2)
+    var f = { R: "-1", U: "", T: "", A: "", L: "" }, err = ""
+    for (var line of String(text || "").split("\n")) {
+      if (line.charAt(1) === ":" && line.charAt(0) in f) f[line.charAt(0)] = line.slice(2)
       else if (/^ERROR:/.test(line)) err = line
     }
-    var target = probeUrl.replace(/^ytdl:\/\//, "")
-    if (url !== target) {
+    if (f.U !== probeUrl.replace(/^ytdl:\/\//, "")) { // stale result; a newer probe was requested
       if (probeUrl) probeNow()
       return
     }
     if (probeReason === "start" && stopRequested) return
 
+    var rc = parseInt(f.R, 10)
     if (rc === 0) {
-      root.title = title
-      root.isLive = isLiveStr === "True" || isLiveStr === "true"
-      root.stream = describeAudioStream(acodec, root.isLive)
+      title = f.T
+      isLive = /^true$/i.test(f.L)
+      stream = describeAudioStream(f.A, isLive)
       lastError = ""
-      console.log("youtube-radio: resolved " + probeUrl + " as " + root.stream + " (live=" + root.isLive + ")")
       if (probeReason === "start") launch(probeUrl)
       else if (mpvProc.running) ipcSend(["loadfile", probeUrl, "replace"])
       return
     }
 
-    // Try fallback URL if preset
     var p = presetForUrl(probeUrl)
-    if (p && p.fallbackUrl && probeUrl !== p.fallbackUrl) {
-      console.log("youtube-radio: primary url failed, trying fallback: " + p.fallbackUrl)
+    if (p && probeUrl !== p.fallbackUrl) {
       runProbe(p.fallbackUrl, probeReason)
       return
     }
-
     lastError = probeError(err, rc)
     console.log("youtube-radio: probe failed rc=" + rc + ": " + lastError)
     if (probeReason === "retry") scheduleRetry()
   }
 
-  function describeAudioStream(acodec, isLive) {
-    var prefix = isLive ? "Live · " : ""
-    var a = String(acodec || "").trim()
-    if (a && a !== "NA" && a !== "none") {
-      var aName = /^opus/i.test(a) ? "Opus"
-        : /^mp4a/i.test(a) || /^aac/i.test(a) ? "AAC"
-        : a.toUpperCase()
-      return prefix + "Audio (" + aName + ")"
-    }
-    return prefix + "Audio"
+  function describeAudioStream(acodec, live) {
+    var a = String(acodec || "")
+    var name = /^opus/i.test(a) ? "Opus" : /^(mp4a|aac)/i.test(a) ? "AAC"
+      : a && a !== "NA" && a !== "none" ? a.toUpperCase() : ""
+    return (live ? "Live · " : "") + "Audio" + (name ? " (" + name + ")" : "")
   }
 
   function probeError(err, rc) {
@@ -491,6 +412,7 @@ Item {
 
   // ------------------------------------------------------------ Processes
 
+  // Kill any mpv orphaned by a previous shell instance before binding the socket.
   Process {
     id: cleanupProc
     command: ["pkill", "-9", "-f", "input-ipc-server=" + root.socketPath]
@@ -504,17 +426,15 @@ Item {
         var s = String(line || "").trim()
         if (!s) return
         console.log("youtube-radio: " + s)
-        if (/error|failed|ERROR/i.test(s)) root.stderrTail = s
+        if (/error|failed/i.test(s)) root.stderrTail = s
       }
     }
     onStarted: {
       root.stopRequested = false
       root.stderrTail = ""
-      reconnect.restart()
     }
-    onExited: function(exitCode, exitStatus) {
-      console.log("youtube-radio: mpv exited code=" + exitCode + " stopRequested=" + root.stopRequested)
-      root.ipcDisconnect()
+    onExited: function(exitCode) {
+      ipcLoader.active = false
       quitGrace.stop()
       killGrace.stop()
       root.loaded = false
@@ -522,12 +442,10 @@ Item {
         root.title = ""
         root.stream = ""
       }
-      if (!root.stopRequested && exitCode !== 0) {
-        if (!root.lastError)
-          root.lastError = exitCode === 255 || exitCode === -1
-            ? "mpv n'a pas pu démarrer"
-            : (root.stderrTail || "mpv s'est arrêté avec le code " + exitCode)
-      }
+      if (!root.stopRequested && exitCode !== 0 && !root.lastError)
+        root.lastError = exitCode === 255 || exitCode === -1
+          ? "mpv n'a pas pu démarrer"
+          : (root.stderrTail || "mpv s'est arrêté avec le code " + exitCode)
       if (root.restartPending) {
         root.restartPending = false
         root.pendingUrl = root.activeUrl
@@ -545,14 +463,10 @@ Item {
   Timer {
     id: killGrace
     interval: 1500
-    onTriggered: if (mpvProc.running) {
-      console.log("youtube-radio: sending SIGKILL to mpv")
-      mpvProc.signal(9)
-    }
+    onTriggered: if (mpvProc.running) mpvProc.signal(9)
   }
 
   Timer {
-    id: startWatchdog
     interval: 30000
     running: mpvProc.running && !root.ipcConnected && !root.stopRequested
     onTriggered: {
@@ -562,37 +476,25 @@ Item {
     }
   }
 
+  // Resume where the last shell instance left off, once our shell.json entry is known.
+  // Deferred: inside onConfigChanged the settings.* bindings have not re-evaluated yet.
   property bool restored: false
-
-  function restoreIfNeeded() {
-    if (restored || !settings.entry || settings.entry.id !== root.pluginId) return
+  onConfigChanged: Qt.callLater(function() {
+    if (restored || !settings.entry.id) return
     restored = true
-    console.log("youtube-radio: restore playing=" + settings.playing + " url=" + settings.url)
-    pendingUrl = ""
-    if (!cleanupProc.running) cleanupProc.running = true
     if (settings.playing && settings.url) start(settings.url)
-  }
+  })
 
-  onSettingsRevisionChanged: restoreIfNeeded()
-  onShellChanged: restoreIfNeeded()
-  Component.onCompleted: restoreIfNeeded()
-
-  Timer {
-    interval: 3000
-    running: !root.restored
-    onTriggered: if (!root.restored) { root.restored = true; cleanupProc.running = true }
-  }
-
-  Component.onDestruction: {
-    if (mpvProc.running) mpvProc.signal(9)
-  }
+  Component.onDestruction: if (mpvProc.running) mpvProc.signal(9)
 
   // ------------------------------------------------------------ MPV IPC
+  // The socket is recreated on every attempt: a Quickshell Socket does not retry
+  // after a failed connect, and mpv only creates the socket once it is up.
 
   Loader {
     id: ipcLoader
     active: false
-    onLoaded: if (item && item.connected) root.ipcSubscribe(item)
+    onLoaded: if (item.connected) root.ipcSubscribe(item)
     sourceComponent: Socket {
       id: sock
       property bool subscribed: false
@@ -600,18 +502,10 @@ Item {
       connected: true
       parser: SplitParser {
         onRead: function(line) {
-          var s = String(line || "").trim()
-          if (!s) return
-          var msg
-          try { msg = JSON.parse(s) } catch (e) { return }
-          root.handleIpc(msg)
+          try { root.handleIpc(JSON.parse(line)) } catch (e) {}
         }
       }
-      onConnectionStateChanged: {
-        if (connected) root.ipcSubscribe(sock)
-        else root.ipcLost()
-      }
-      onError: function(err) { root.ipcLost() }
+      onConnectionStateChanged: if (connected) root.ipcSubscribe(sock)
     }
   }
 
@@ -619,63 +513,44 @@ Item {
   readonly property bool ipcConnected: ipc ? ipc.connected === true : false
 
   function ipcSubscribe(socket) {
-    if (!socket || socket.subscribed || !socket.connected) return
+    if (socket.subscribed) return
     socket.subscribed = true
     var props = ["pause", "mute", "volume", "media-title", "duration", "seekable"]
     for (var i = 0; i < props.length; i++)
       socket.write(JSON.stringify({ command: ["observe_property", i + 1, props[i]] }) + "\n")
-    socket.write(JSON.stringify({ command: ["get_property", "pause"] }) + "\n")
     socket.flush()
   }
 
-  function ipcConnect() {
-    ipcLoader.active = false
-    ipcLoader.active = true
-  }
-
-  function ipcDisconnect() {
-    ipcLoader.active = false
-  }
-
-  function ipcLost() {
-    if (mpvProc.running && !stopRequested) reconnect.restart()
-  }
-
   Timer {
-    id: reconnect
     interval: 400
-    onTriggered: {
-      if (!mpvProc.running || root.stopRequested || root.ipcConnected) return
-      root.ipcConnect()
-    }
-  }
-
-  Timer {
-    interval: 2000
     repeat: true
-    running: mpvProc.running && !root.ipcConnected && !reconnect.running
-    onTriggered: reconnect.restart()
+    running: mpvProc.running && !root.ipcConnected && !root.stopRequested
+    onTriggered: { ipcLoader.active = false; ipcLoader.active = true }
   }
 
   Timer {
     interval: 1000
     repeat: true
-    running: mpvProc.running && root.ipcConnected && root.loaded && !root.paused
+    running: root.loaded && root.seekable && !root.paused
     onTriggered: root.pollPosition()
   }
 
   function handleIpc(msg) {
     if (!msg) return
     if (msg.event === "property-change") {
-      if (msg.name === "pause") paused = msg.data === true
-      else if (msg.name === "mute") muted = msg.data === true
-      else if (msg.name === "volume" && isFinite(Number(msg.data))) volume = Number(msg.data)
-      else if (msg.name === "media-title" && typeof msg.data === "string" && msg.data !== "") {
-        title = msg.data
-        if (loaded) refreshHistoryTitle(activeUrl, title)
+      var d = msg.data
+      switch (msg.name) {
+        case "pause": paused = d === true; break
+        case "mute": muted = d === true; break
+        case "volume": if (isFinite(Number(d))) volume = Number(d); break
+        case "duration": duration = Number(d) > 0 ? Number(d) : 0; break
+        case "seekable": seekable = d === true; break
+        case "media-title":
+          if (typeof d === "string" && d !== "") {
+            title = d
+            if (loaded) refreshHistoryTitle(activeUrl, title)
+          }
       }
-      else if (msg.name === "duration") duration = isFinite(Number(msg.data)) && Number(msg.data) > 0 ? Number(msg.data) : 0
-      else if (msg.name === "seekable") seekable = msg.data === true
     } else if (msg.request_id === 1001) {
       if (msg.error === "success" && isFinite(Number(msg.data))) position = Number(msg.data)
     } else if (msg.event === "file-loaded") {
@@ -715,55 +590,40 @@ Item {
     id: retryTimer
     onTriggered: {
       if (!mpvProc.running || root.stopRequested) return
-      console.log("youtube-radio: retry " + root.retries + " for " + root.activeUrl)
       if (root.needsProbe(root.activeUrl)) root.runProbe(root.activeUrl, "retry")
       else root.ipcSend(["loadfile", root.activeUrl, "replace"])
     }
   }
 
   // ------------------------------------------------------------ CLI (IPC)
-
   // omarchy-shell youtube-radio <verb> [arg]
+
   IpcHandler {
     target: "youtube-radio"
 
-    function play(url: string): string {
-      return root.start(url) ? "ok" : root.lastError
-    }
-
-    function preset(name: string): string {
-      return root.playPreset(name) ? "ok" : "preset not found (use: everpop, lofigirl)"
-    }
-
-    function stop(): string {
-      root.stop()
-      return "ok"
-    }
-
-    function toggle(): string {
-      root.toggle()
-      return root.running ? "stopping" : "starting"
-    }
+    function play(url: string): string { return root.start(url) ? "ok" : root.lastError }
+    function preset(name: string): string { return root.playPreset(name) ? "ok" : "preset not found (use: everpop, lofigirl)" }
+    function stop(): string { root.stop(); return "ok" }
+    function toggle(): string { root.toggle(); return root.running ? "stopping" : "starting" }
 
     function pause(value: string): string {
       if (value === "true" || value === "false") root.setPaused(value === "true")
       else if (value === "toggle") root.togglePause()
       else if (value !== "get") return "usage: pause get|true|false|toggle"
-      return root.paused ? "true" : "false"
+      return String(root.paused)
     }
 
     function mute(value: string): string {
       if (value === "true" || value === "false") root.setMuted(value === "true")
       else if (value === "toggle") root.setMuted(!root.muted)
       else if (value !== "get") return "usage: mute get|true|false|toggle"
-      return root.muted ? "true" : "false"
+      return String(root.muted)
     }
 
     function volume(value: string): string {
       if (value !== "get") {
-        var n = Number(value)
-        if (!isFinite(n)) return "usage: volume get|<0-100>"
-        root.setVolume(n)
+        if (!isFinite(Number(value))) return "usage: volume get|<0-100>"
+        root.setVolume(Number(value))
       }
       return String(Math.round(root.volume))
     }
@@ -771,28 +631,24 @@ Item {
     function seek(value: string): string {
       var v = String(value).trim()
       if (v !== "get") {
-        var n = Number(v)
-        if (!isFinite(n) || v === "") return "usage: seek get|+<secs>|-<secs>|<secs>"
-        if (!root.seek(n, /^[+-]/.test(v) ? "relative" : "absolute"))
+        if (v === "" || !isFinite(Number(v))) return "usage: seek get|+<secs>|-<secs>|<secs>"
+        if (!root.seek(Number(v), /^[+-]/.test(v) ? "relative" : "absolute"))
           return root.running ? (root.seekable ? "not loaded" : "not seekable") : "not running"
       }
       return Math.round(root.position) + "/" + Math.round(root.duration)
     }
 
     function url(value: string): string {
-      if (value !== "get") return root.start(value) ? "ok" : root.lastError
-      return root.url
+      return value === "get" ? root.url : root.start(value) ? "ok" : root.lastError
     }
 
     function cookies(value: string): string {
-      if (value === "get") return root.cookies
-      return root.setCookies(value)
+      return value === "get" ? root.cookies : root.setCookies(value)
     }
 
     function history(value: string): string {
-      if (value === "clear") { root.clearHistory(); return "ok" }
-      if (value !== "get") return "usage: history get|clear"
-      return JSON.stringify(root.history)
+      if (value === "clear") { root.persist("history", []); return "ok" }
+      return value === "get" ? JSON.stringify(root.history) : "usage: history get|clear"
     }
 
     function status(): string {

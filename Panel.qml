@@ -13,7 +13,6 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var service: null
-  property bool openedFromHotkey: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -34,7 +33,8 @@ Panel {
   readonly property string stream: ready ? service.stream : ""
   readonly property string cookiesFile: ready ? service.cookies : ""
   readonly property string activePreset: ready ? service.activePresetId : ""
-  readonly property var history: ready && Array.isArray(service.history) ? service.history : []
+  readonly property var history: ready ? service.history : []
+  readonly property var presets: ready ? service.presets : []
 
   readonly property string statusLabel: {
     if (!ready) return "Service non chargé"
@@ -104,7 +104,7 @@ Panel {
     if (!cursorActive) { cursorActive = true; return }
     if (!ready) return
     switch (focusSection) {
-      case "presets": selectedIndex = Math.max(0, Math.min(1, selectedIndex + delta)); break
+      case "presets": selectedIndex = Math.max(0, Math.min(presets.length - 1, selectedIndex + delta)); break
       case "transport": selectedIndex = Math.max(0, Math.min(2, selectedIndex + delta)); break
       case "position": seekRelative(delta * 5); break
       case "volume": service.setVolume(Math.max(0, Math.min(100, volume + delta * 5))); break
@@ -115,10 +115,7 @@ Panel {
   function activateCursor() {
     if (!ready) return
     switch (focusSection) {
-      case "presets":
-        if (selectedIndex === 0) service.playPreset("everpop")
-        else if (selectedIndex === 1) service.playPreset("lofigirl")
-        break
+      case "presets": if (presets[selectedIndex]) service.playPreset(presets[selectedIndex].id); break
       case "transport":
         if (selectedIndex === 0 && startButton.enabled) { running ? service.togglePause() : service.start() }
         else if (selectedIndex === 1 && stopButton.enabled) service.stop()
@@ -139,43 +136,27 @@ Panel {
     if (root.seekable) root.service.seek(secs, "relative")
   }
 
-  function open() {
-    openedFromHotkey = false
-    setCenterHoverRevealSuppressed(false)
-    resetCursor()
-    root.controller.show()
-    syncField()
+  // The bar identifies this panel by the widget in its slot (hostWidget), so
+  // switchPanel must pass that rather than the base Panel's `root`.
+  function switchPanel(direction) {
+    return root.bar ? root.bar.switchPanelFrom(root.barIdentity, direction) : false
   }
 
-  function openFromHotkey() {
-    openedFromHotkey = true
+  function setCenterHoverRevealSuppressed(value) {
+    if (root.bar) root.bar.setCenterHoverRevealSuppressed(value)
+  }
+
+  function open() {
     resetCursor()
     root.controller.show()
     syncField()
-    Qt.callLater(function() {
-      if (root.opened) setCenterHoverRevealSuppressed(true)
-    })
+    // After show: the popout handoff closes the previous panel, which clears the flag.
+    Qt.callLater(function() { if (root.opened) setCenterHoverRevealSuppressed(true) })
   }
 
   function close() {
     setCenterHoverRevealSuppressed(false)
     root.controller.hide()
-  }
-
-  function toggle() {
-    if (root.opened) root.close()
-    else root.openFromHotkey()
-  }
-
-  function switchPanel(direction) {
-    if (root.bar && typeof root.bar.switchPanelFrom === "function")
-      return root.bar.switchPanelFrom(root.barIdentity, direction)
-    return false
-  }
-
-  function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
-      root.bar.setCenterHoverRevealSuppressed(value)
   }
 
   function syncField() {
@@ -216,10 +197,6 @@ Panel {
     keyCatcher.forceActiveFocus()
   }
 
-  function historyLabel(entry) {
-    return entry && entry.title !== "" ? entry.title : String(entry ? entry.url : "")
-  }
-
   function formatTime(secs) {
     var t = Math.max(0, Math.round(Number(secs) || 0))
     var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60
@@ -258,8 +235,7 @@ Panel {
           if (root.cursorActive) root.activateCursor()
           else if (root.ready) { root.running ? root.service.togglePause() : root.service.start() }
         }
-        else if (t === "1") { if (root.ready) root.service.playPreset("everpop") }
-        else if (t === "2") { if (root.ready) root.service.playPreset("lofigirl") }
+        else if (/^[1-9]$/.test(t)) { if (root.presets[t - 1]) root.service.playPreset(root.presets[t - 1].id) }
         else if (t === "l") root.seekRelative(5)
         else if (t === "h") root.seekRelative(-5)
         else if (t === "k") root.seekRelative(60)
@@ -342,37 +318,26 @@ Panel {
         }
 
         Row {
+          id: presetRow
           width: parent.width
           spacing: Style.space(6)
 
-          Button {
-            id: everpopButton
-            width: (parent.width - parent.spacing) / 2
-            iconText: "󰎈"
-            text: "EverPop 7080"
-            foreground: root.fg
-            fontFamily: root.fontFamily
-            bordered: true
-            selected: root.activePreset === "everpop"
-            hasCursor: root.hasCursorOn("presets", 0)
-            onHovered: function(h) { if (h) root.setCursor("presets", 0) }
-            enabled: root.ready
-            onClicked: root.service.playPreset("everpop")
-          }
-
-          Button {
-            id: lofigirlButton
-            width: (parent.width - parent.spacing) / 2
-            iconText: "󰠃"
-            text: "Lofi Girl"
-            foreground: root.fg
-            fontFamily: root.fontFamily
-            bordered: true
-            selected: root.activePreset === "lofigirl"
-            hasCursor: root.hasCursorOn("presets", 1)
-            onHovered: function(h) { if (h) root.setCursor("presets", 1) }
-            enabled: root.ready
-            onClicked: root.service.playPreset("lofigirl")
+          Repeater {
+            model: root.presets
+            Button {
+              required property var modelData
+              required property int index
+              width: (presetRow.width - presetRow.spacing * (root.presets.length - 1)) / root.presets.length
+              iconText: modelData.icon
+              text: modelData.shortTitle
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              selected: root.activePreset === modelData.id
+              hasCursor: root.hasCursorOn("presets", index)
+              onHovered: function(h) { if (h) root.setCursor("presets", index) }
+              onClicked: root.service.playPreset(modelData.id)
+            }
           }
         }
 
@@ -678,7 +643,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   anchors.leftMargin: Style.spacing.controlPaddingX
                   anchors.rightMargin: Style.spacing.controlPaddingX
-                  text: root.historyLabel(modelData)
+                  text: modelData.title || modelData.url
                   color: index === historyList.currentIndex ? Style.hoverStateColor(root.fg, Color.accent) : root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body

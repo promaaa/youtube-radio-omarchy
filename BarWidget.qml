@@ -2,48 +2,34 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Bar entry point for YouTube Radio: displays a music/radio glyph in the bar.
-// Left click: open panel
-// Middle click: pause / resume
-// Right click: start / stop
+// Bar glyph for YouTube Radio.
+// Left click: open panel · Middle click: pause / resume · Right click: start / stop
 BarWidget {
   id: root
   moduleName: "promaa.youtube-radio"
 
-  readonly property var service: bar && bar.shell && typeof bar.shell.serviceFor === "function"
-    ? bar.shell.serviceFor(root.moduleName) : null
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
   readonly property string status: service ? service.status : "stopped"
   readonly property bool active: status === "playing" || status === "starting"
 
   function injectPanel() {
-    var target = panelLoader.item
-    if (!target) return
-    if ("bar" in target) target.bar = root.bar
-    if ("settings" in target) target.settings = root.settings
-    if ("service" in target) target.service = root.service
-    if ("anchorItem" in target) target.anchorItem = button
-    if ("hostWidget" in target) target.hostWidget = root
+    var p = panelLoader.item
+    if (!p) return
+    p.bar = root.bar
+    p.settings = root.settings
+    p.service = root.service
+    p.anchorItem = button
+    p.hostWidget = root
   }
 
-  function togglePanel() {
-    if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
-  }
-
+  // Shape contract the bar routes summon/hide/toggle and popout switching through:
+  // open/close/opened/popoutSwitchClosing/closeForPopoutSwitch on the slot widget.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
-
-  function open() {
-    if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey()
-  }
-
-  function close() {
-    if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
-  }
-
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
-
-  function closeForPopoutSwitch() {
-    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
-  }
+  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function close() { if (panelLoader.item) panelLoader.item.close() }
+  function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
+  function closeForPopoutSwitch() { if (panelLoader.item) panelLoader.item.closeForPopoutSwitch() }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -54,7 +40,6 @@ BarWidget {
 
   Loader {
     id: panelLoader
-    active: true
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: {
@@ -75,10 +60,9 @@ BarWidget {
     Behavior on opacity { NumberAnimation { duration: 160 } }
 
     onPressed: function(b) {
-      if (!root.service) { root.togglePanel(); return }
-      if (b === Qt.RightButton) root.service.toggle()
-      else if (b === Qt.MiddleButton) root.service.togglePause()
-      else root.togglePanel()
+      if (root.service && b === Qt.RightButton) root.service.toggle()
+      else if (root.service && b === Qt.MiddleButton) root.service.togglePause()
+      else root.toggle()
     }
   }
 }
