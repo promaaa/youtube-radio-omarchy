@@ -12,6 +12,22 @@
 # stdout: "<first-seq> <latest-seq> <segment-seconds>"  (latest = live edge at build time)
 set -euo pipefail
 
+# MPEG-TS timestamps wrap every 2^33/90000 s and ffmpeg stalls on any seek that
+# crosses a wrap, so the playlist must not span one. A live running for months
+# (EverPop) always has a wrap inside its window: start just after the last one.
+# Args: first latest segment-seconds pts-of-first. Echoes the first segment to use.
+wrap_clamp() {
+  awk -v f="$1" -v l="$2" -v d="$3" -v p="$4" \
+    'BEGIN { w = 95443.7177 - p; if (w < (l - f) * d) f += int((w + 30) / d) + 1; print f }'
+}
+
+if [[ ${1:-} == selftest ]]; then
+  [[ $(wrap_clamp 100 200 5 0) == 100 ]]                          # no wrap in window
+  [[ $(wrap_clamp 100 200 5 95400) == 115 ]]                      # wrap right at the start
+  [[ $(wrap_clamp 2076002 2084071 5.005 72013.732) == 2080690 ]]  # EverPop
+  echo ok; exit 0
+fi
+
 pl=$(curl -sfL --max-time 15 "$1")
 seg=$(grep -m1 '^https\?://' <<<"$pl")
 dur=$(grep -m1 '^#EXTINF:' <<<"$pl" | cut -d: -f2 | cut -d, -f1)
@@ -29,6 +45,16 @@ while (( step < 20000 )) && avail $((lo - step)); do lo=$((lo - step)); step=$((
 hi=$lo lo=$((lo - step))
 while (( hi - lo > 1 )); do mid=$(((lo + hi) / 2)); if avail "$mid"; then hi=$mid; else lo=$mid; fi; done
 first=$hi
+
+# Probe the first segment's timestamp and drop everything before the last wrap.
+probe="$2.probe"
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXTINF:%s,\n%s\n#EXT-X-ENDLIST\n' \
+  "$(( ${dur%.*} + 1 ))" "$dur" "${tmpl/@SQ@/$first}" > "$probe"
+pts=$(ffprobe -v error -f hls -allowed_extensions ALL \
+        -protocol_whitelist file,http,https,tcp,tls,crypto \
+        -show_entries format=start_time -of csv=p=0 "$probe" 2>/dev/null) || pts=""
+rm -f "$probe"
+if [[ $pts =~ ^[0-9.]+$ ]]; then first=$(wrap_clamp "$first" "$latest" "$dur" "$pts"); fi
 
 # Extend into the future until shortly before the signed URLs expire (max 6h).
 now=$(date +%s)
